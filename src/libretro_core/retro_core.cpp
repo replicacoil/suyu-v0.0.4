@@ -728,6 +728,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         g_system->ApplySettings();
 
         g_emu_window->UpdateCurrentFramebufferLayout(kFrameWidth * g_output_scale, kFrameHeight * g_output_scale);
+        g_geometry_dirty = true;
 
         // Join a suyu room if the user configured one. Done here rather than
         // in retro_init so the options the frontend collected are already
