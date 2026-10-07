@@ -223,7 +223,7 @@ std::string ReadOption(const char* key) {
     return {};
 }
 
-// Builds a Common::Log::Filter from the eden_log_* debugging options and
+// Builds a Common::Log::Filter from the suyu_log_* debugging options and
 // actually applies it via Common::Log::SetGlobalFilter() - Settings::values
 // .log_filter on its own does nothing; every other frontend (see
 // yuzu/main_window.cpp) parses it into a real Filter and applies that
@@ -231,7 +231,7 @@ std::string ReadOption(const char* key) {
 // Settings::values.log_filter.SetValue() call in retro_init() was silently
 // inert for that reason - it set a value nothing ever read).
 void ApplyLogFilterFromOptions() {
-    const std::string level_str = ReadOption("eden_log_level");
+    const std::string level_str = ReadOption("suyu_log_level");
     const char* level_name = "Info";
     if (level_str == "Critical")
         level_name = "Critical";
@@ -249,10 +249,10 @@ void ApplyLogFilterFromOptions() {
     // the global level.
     filter_str += " Service.VI:Debug Service.AM:Debug Service.Nvnflinger:Debug";
 
-    if (ReadOption("eden_log_render") == "On") {
+    if (ReadOption("suyu_log_render") == "On") {
         filter_str += " Render:Debug Render.Vulkan:Debug Render.OpenGL:Debug Render.Software:Debug";
     }
-    if (ReadOption("eden_log_gpu") == "On") {
+    if (ReadOption("suyu_log_gpu") == "On") {
         filter_str += " HW.GPU:Debug";
     }
 
@@ -266,7 +266,7 @@ void ApplyLogFilterFromOptions() {
 
 // Every Settings::ControllerType except Handheld, which isn't a per-port
 // device choice at all - it's a separate, implicit NpadIdType::Handheld slot
-// Eden's HID core manages itself based on the Docked Mode option, not
+// Suyu's HID core manages itself based on the Docked Mode option, not
 // something selected per-port here (see emulated_controller.cpp).
 static const retro_controller_description pad_types[] = {
     {"Pro Controller", RETRO_DEVICE_JOYPAD},
@@ -292,7 +292,7 @@ unsigned g_port_device_type[8] = {};
 // Decodes the libretro "device" value RetroArch passes to
 // retro_set_controller_port_device() - driven by its own
 // Quick Menu > Controls > Port N > Device Type menu, populated from the
-// pad_types[] list above - into the Settings::ControllerType Eden's HID core
+// pad_types[] list above - into the Settings::ControllerType Suyu's HID core
 // actually wants. Defaults to Pro Controller for RETRO_DEVICE_NONE or
 // anything unrecognised - it's accepted everywhere, including Docked mode
 // (unlike Handheld, which real hardware and some games specifically reject
@@ -324,7 +324,7 @@ Settings::ControllerType MapDeviceType(unsigned device) {
     }
 }
 
-// Connects and (re)types every player port, then tells Eden's HID core to
+// Connects and (re)types every player port, then tells Suyu's HID core to
 // pick the change up. Shared by retro_load_game() (first load) and
 // retro_set_controller_port_device() (RetroArch calls this live whenever the
 // user changes Port N's Device Type in Quick Menu > Controls - including
@@ -410,7 +410,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     // RetroArch from the last several years, but costs little to keep).
     static const struct retro_core_option_v2_category categories[] = {
         {"debugging", "Debugging",
-         "Logging controls for comparing this core's behaviour against standalone Eden - "
+         "Logging controls for comparing this core's behaviour against standalone Suyu - "
          "e.g. tracking down a scene that runs fine standalone but not here."},
         {nullptr, nullptr, nullptr},
     };
@@ -630,10 +630,10 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
             {"suyu_online_server", "suyu Room Server; 127.0.0.1"},
             {"suyu_online_port", "suyu Room Port; 24872"},
             {"suyu_online_nickname", "suyu Online Nickname; Player"},
-            {"eden_log_level", "Debugging > Global Log Level; Info|Debug|Trace|Warning|Error|Critical"},
-            {"eden_log_render", "Debugging > Rendering/Pipeline Log; Off|On"},
-            {"eden_log_gpu", "Debugging > GPU/Engine Log; Off|On"},
-            {"eden_log_fps", "Debugging > Frame Timing Log; Off|On"},
+            {"suyu_log_level", "Debugging > Global Log Level; Info|Debug|Trace|Warning|Error|Critical"},
+            {"suyu_log_render", "Debugging > Rendering/Pipeline Log; Off|On"},
+            {"suyu_log_gpu", "Debugging > GPU/Engine Log; Off|On"},
+            {"suyu_log_fps", "Debugging > Frame Timing Log; Off|On"},
             {nullptr, nullptr},
         };
         cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
