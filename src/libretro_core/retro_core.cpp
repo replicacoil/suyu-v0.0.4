@@ -33,6 +33,7 @@
 //     RETRO_SERIALIZATION_QUIRK_INCOMPLETE so the frontend reports them as
 //     unavailable rather than offering them and failing later.
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -70,6 +71,7 @@ bool g_game_loaded = false;
 
 unsigned g_output_scale = 1;
 bool g_geometry_dirty = false;
+static bool g_rumble_enabled = true;
 
 // False: suyu drives a host audio device directly (default, sounds correct).
 // True: samples are handed to the frontend via retro_audio_sample_batch.
@@ -79,6 +81,15 @@ bool g_use_frontend_audio = false;
 // FrontendAudioCallback() instead of doing it inline, since both draining the
 // same queue would just race pointlessly.
 bool g_audio_callback_registered = false;
+
+// Set from the "suyu_log_fps" debugging option; see CheckForLiveOptionChanges
+// and the [FPS] logging block in retro_run().
+bool g_log_fps_enabled = false;
+
+// Queried once in retro_load_game(); see SetUpRumble().
+struct retro_rumble_interface g_rumble_interface{};
+bool g_has_rumble_interface = false;
+
 
 retro_environment_t g_environ_cb;
 retro_video_refresh_t g_video_cb;
@@ -203,6 +214,183 @@ void RedirectSuyuPathsToFrontend() {
               save_base.string());
 }
 
+// Reads a single core option's current value, or empty if unavailable.
+std::string ReadOption(const char* key) {
+    struct retro_variable v{key, nullptr};
+    if (g_environ_cb && g_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value) {
+        return v.value;
+    }
+    return {};
+}
+
+// Builds a Common::Log::Filter from the eden_log_* debugging options and
+// actually applies it via Common::Log::SetGlobalFilter() - Settings::values
+// .log_filter on its own does nothing; every other frontend (see
+// yuzu/main_window.cpp) parses it into a real Filter and applies that
+// explicitly, which this core never did until now (the previous hardcoded
+// Settings::values.log_filter.SetValue() call in retro_init() was silently
+// inert for that reason - it set a value nothing ever read).
+void ApplyLogFilterFromOptions() {
+    const std::string level_str = ReadOption("eden_log_level");
+    const char* level_name = "Info";
+    if (level_str == "Critical")
+        level_name = "Critical";
+    else if (level_str == "Error")
+        level_name = "Error";
+    else if (level_str == "Warning")
+        level_name = "Warning";
+    else if (level_str == "Debug")
+        level_name = "Debug";
+    else if (level_str == "Trace")
+        level_name = "Trace";
+
+    std::string filter_str = std::string("*:") + level_name;
+    // Always-on: cheap, useful presentation/frame-pacing detail regardless of
+    // the global level.
+    filter_str += " Service.VI:Debug Service.AM:Debug Service.Nvnflinger:Debug";
+
+    if (ReadOption("eden_log_render") == "On") {
+        filter_str += " Render:Debug Render.Vulkan:Debug Render.OpenGL:Debug Render.Software:Debug";
+    }
+    if (ReadOption("eden_log_gpu") == "On") {
+        filter_str += " HW.GPU:Debug";
+    }
+
+    Common::Log::Filter filter;
+    filter.ParseFilterString(filter_str);
+    Common::Log::SetGlobalFilter(filter);
+    Settings::values.log_filter.SetValue(filter_str);
+
+    LOG_INFO(Frontend, "libretro: applied log filter: {}", filter_str);
+}
+
+// Every Settings::ControllerType except Handheld, which isn't a per-port
+// device choice at all - it's a separate, implicit NpadIdType::Handheld slot
+// Eden's HID core manages itself based on the Docked Mode option, not
+// something selected per-port here (see emulated_controller.cpp).
+static const retro_controller_description pad_types[] = {
+    {"Pro Controller", RETRO_DEVICE_JOYPAD},
+    {"Joy-Con Pair", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0)},
+    {"Joy-Con Left", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1)},
+    {"Joy-Con Right", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 2)},
+    {"GameCube Controller", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 3)},
+    {"Poke Ball Plus", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 4)},
+    {"NES Controller", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 5)},
+    {"SNES Controller", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 6)},
+    {"N64 Controller", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 7)},
+    {"Sega Genesis Controller", RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 8)},
+    {nullptr, 0}};
+constexpr unsigned kNumPadTypes = 10;
+
+static const struct retro_controller_info port_info[] = {
+    {pad_types, kNumPadTypes}, {pad_types, kNumPadTypes}, {pad_types, kNumPadTypes},
+    {pad_types, kNumPadTypes}, {pad_types, kNumPadTypes}, {pad_types, kNumPadTypes},
+    {pad_types, kNumPadTypes}, {pad_types, kNumPadTypes}, {nullptr, 0}};
+
+unsigned g_port_device_type[8] = {};
+
+// Decodes the libretro "device" value RetroArch passes to
+// retro_set_controller_port_device() - driven by its own
+// Quick Menu > Controls > Port N > Device Type menu, populated from the
+// pad_types[] list above - into the Settings::ControllerType Eden's HID core
+// actually wants. Defaults to Pro Controller for RETRO_DEVICE_NONE or
+// anything unrecognised - it's accepted everywhere, including Docked mode
+// (unlike Handheld, which real hardware and some games specifically reject
+// while docked - see the pad_types[] comment above for why it's excluded).
+Settings::ControllerType MapDeviceType(unsigned device) {
+    switch (device) {
+    case RETRO_DEVICE_JOYPAD:
+        return Settings::ControllerType::ProController;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0):
+        return Settings::ControllerType::DualJoyconDetached;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 1):
+        return Settings::ControllerType::LeftJoycon;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 2):
+        return Settings::ControllerType::RightJoycon;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 3):
+        return Settings::ControllerType::GameCube;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 4):
+        return Settings::ControllerType::Pokeball;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 5):
+        return Settings::ControllerType::NES;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 6):
+        return Settings::ControllerType::SNES;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 7):
+        return Settings::ControllerType::N64;
+    case RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 8):
+        return Settings::ControllerType::SegaGenesis;
+    default:
+        return Settings::ControllerType::ProController;
+    }
+}
+
+// Connects and (re)types every player port, then tells Eden's HID core to
+// pick the change up. Shared by retro_load_game() (first load) and
+// retro_set_controller_port_device() (RetroArch calls this live whenever the
+// user changes Port N's Device Type in Quick Menu > Controls - including
+// *after* retro_load_game() has already run, which is exactly why a type
+// change only ever took effect on the next full session rather than
+// immediately or even "on next restart": the stored g_port_device_type was
+// being applied once at load, but the frontend's actual call frequently
+// arrives after that point has already passed).
+void ApplyControllerPorts() {
+    if (!g_system) {
+        return;
+    }
+    for (int i = 0; i < 8; ++i) {
+        auto& p = Settings::values.players.GetValue()[i];
+        p.connected = true;
+        p.controller_type = MapDeviceType(g_port_device_type[i]);
+        p.vibration_enabled = g_rumble_enabled;
+        p.vibration_strength =
+            100; // 100% by default, RetroArch's own "Rumble Strength" slider can scale it down
+    }
+    g_system->HIDCore().ReloadInputDevices();
+}
+
+// Queries RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE and registers a callback on
+// VirtualGamepad that forwards vibration requests to it. Without this,
+// VirtualGamepad::SetVibration() has nowhere to send a request at all (see
+// its definition - it just no-ops if no callback is registered), which is
+// why rumble never worked: nothing ever called SetVibrationCallback().
+// Safe to call every retro_load_game() - re-querying the interface and
+// re-registering the same callback is idempotent.
+void SetUpRumble() {
+    if (!g_environ_cb || !g_input_subsystem) {
+        return;
+    }
+    g_has_rumble_interface =
+        g_environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &g_rumble_interface) &&
+        g_rumble_interface.set_rumble_state != nullptr;
+    if (!g_has_rumble_interface) {
+        LOG_WARNING(Frontend,
+                    "libretro: frontend doesn't support RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE "
+                    "- controller rumble will not work");
+        return;
+    }
+
+    auto* vgp = g_input_subsystem->GetVirtualGamepad();
+    if (!vgp) {
+        return;
+    }
+    vgp->SetVibrationCallback([](std::size_t player_index, float low_amplitude,
+                                 float high_amplitude) {
+        if (!g_has_rumble_interface || !g_rumble_interface.set_rumble_state) {
+            return;
+        }
+        if (player_index >= 8) {
+            return;
+        }
+        const auto to_strength = [](float amplitude) -> uint16_t {
+            return static_cast<uint16_t>(std::clamp(amplitude, 0.0f, 1.0f) * 0xFFFF);
+        };
+        const auto port = static_cast<unsigned>(player_index);
+        g_rumble_interface.set_rumble_state(port, RETRO_RUMBLE_STRONG, to_strength(low_amplitude));
+        g_rumble_interface.set_rumble_state(port, RETRO_RUMBLE_WEAK, to_strength(high_amplitude));
+    });
+    LOG_INFO(Frontend, "libretro: rumble interface registered");
+}
+
 } // namespace
 
 extern "C" {
@@ -216,34 +404,240 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_XRGB8888;
     cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 
-    static const struct retro_variable vars[] = {
-        {"suyu_renderer", "Renderer; Vulkan|OpenGL|Software"},
-        {"suyu_resolution", "Internal Resolution; 1x|2x|3x|4x"},
-        {"suyu_scaling_filter", "Window Adapting Filter; Bilinear|Bicubic|Lanczos|ScaleForce|FSR|NearestNeighbor"},
-        {"suyu_anti_aliasing", "Anti-Aliasing; None|FXAA|SMAA"},
-        {"suyu_cpu_accuracy", "CPU Accuracy; Auto|Accurate|Unsafe"},
-        {"suyu_use_docked", "Docked Mode; Yes|No"},
-        {"suyu_fastmem", "Fastmem; Enabled|Disabled"},
-        // Redirects suyu's data (NAND/SDMC/saves/config/keys/cache/logs) into
-        // RetroArch's own system/save directories instead of suyu's normal
-        // %APPDATA%\suyu (or <retroarch>\user in portable mode) location.
-        // Default is Enabled so the core behaves like other libretro cores
-        // out of the box; switch to Disabled to keep using a standalone
-        // suyu install's existing data instead.
-        {"suyu_use_frontend_dirs", "Use RetroArch System/Save Directories; Enabled|Disabled"},
-        {"suyu_audio_output", "Audio Output; Host (direct)|Frontend (libretro)"},
-        // suyu's own online play. RetroArch's netplay can't drive this core
-        // (see retro_serialize_size), but suyu's room system tunnels the
-        // game's own LAN multiplayer between peers and doesn't need frame
-        // sync, so it works here - it just needs somewhere to be configured,
-        // which is what these are.
-        {"suyu_online_enable", "suyu Online Play; Disabled|Enabled"},
-        {"suyu_online_server", "suyu Room Server; 127.0.0.1"},
-        {"suyu_online_port", "suyu Room Port; 24872"},
-        {"suyu_online_nickname", "suyu Online Nickname; Player"},
-        {nullptr, nullptr},
+    // Core Options V2, with everything new (the debugging tools below) under
+    // its own "Debugging" category - the older flat list further down is
+    // only a fallback for frontends that don't support V2 (unlikely for any
+    // RetroArch from the last several years, but costs little to keep).
+    static const struct retro_core_option_v2_category categories[] = {
+        {"debugging", "Debugging",
+         "Logging controls for comparing this core's behaviour against standalone Eden - "
+         "e.g. tracking down a scene that runs fine standalone but not here."},
+        {nullptr, nullptr, nullptr},
     };
-    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
+
+    static const struct retro_core_option_v2_definition definitions[] = {
+        {"suyu_renderer",
+         "Renderer",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Vulkan", nullptr}, {"OpenGL", nullptr}, {"Software", nullptr}, {nullptr, nullptr}},
+         "Vulkan"},
+        {"suyu_resolution",
+         "Internal Resolution",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"1x (Native)", nullptr},
+          {"2x (~4K)", nullptr},
+          {"3x (~6K)", nullptr},
+          {"4x (~8K)", nullptr},
+          {nullptr, nullptr}},
+         "1x (Native)"},
+        {"suyu_scaling_filter",
+         "Window Adapting Filter",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Bilinear", nullptr},
+          {"Bicubic", nullptr},
+          {"Lanczos", nullptr},
+          {"ScaleForce", nullptr},
+          {"FSR", nullptr},
+          {"NearestNeighbor", nullptr},
+          {nullptr, nullptr}},
+         "Bilinear"},
+        {"suyu_anti_aliasing",
+         "Anti-Aliasing",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"None", nullptr}, {"FXAA", nullptr}, {"SMAA", nullptr}, {nullptr, nullptr}},
+         "None"},
+        {"suyu_cpu_accuracy",
+         "CPU Accuracy",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Auto", nullptr}, {"Accurate", nullptr}, {"Unsafe", nullptr}, {nullptr, nullptr}},
+         "Auto"},
+        {"suyu_use_docked",
+         "Docked Mode",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Yes", nullptr}, {"No", nullptr}, {nullptr, nullptr}},
+         "Yes"},
+        {"suyu_fastmem",
+         "Fastmem",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Enabled", nullptr}, {"Disabled", nullptr}, {nullptr, nullptr}},
+         "Enabled"},
+        {"suyu_use_frontend_dirs",
+         "Use RetroArch System/Save Directories",
+         nullptr,
+         "Redirects suyu's data (NAND/SDMC/saves/config/keys/cache/logs) into RetroArch's own "
+         "system/save directories instead of suyu's normal %APPDATA%/suyu (or <retroarch>/user "
+         "in portable mode) location. Disable to use a standalone suyu install's existing data.",
+         nullptr,
+         nullptr,
+         {{"Enabled", nullptr}, {"Disabled", nullptr}, {nullptr, nullptr}},
+         "Enabled"},
+        {"suyu_audio_output",
+         "Audio Output",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Host (direct)", nullptr}, {"Frontend (libretro)", nullptr}, {nullptr, nullptr}},
+         "Host (direct)"},
+        {"suyu_online_enable",
+         "suyu Online Play",
+         nullptr,
+         "suyu's own room-based multiplayer. RetroArch's netplay can't drive this core (no save "
+         "state support), but this tunnels the game's own LAN multiplayer between peers instead.",
+         nullptr,
+         nullptr,
+         {{"Disabled", nullptr}, {"Enabled", nullptr}, {nullptr, nullptr}},
+         "Disabled"},
+        {"suyu_online_server",
+         "suyu Room Server",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"127.0.0.1", nullptr}, {nullptr, nullptr}},
+         "127.0.0.1"},
+        {"suyu_online_port",
+         "suyu Room Port",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"24872", nullptr}, {nullptr, nullptr}},
+         "24872"},
+        {"suyu_online_nickname",
+         "suyu Online Nickname",
+         nullptr,
+         nullptr,
+         nullptr,
+         nullptr,
+         {{"Player", nullptr}, {nullptr, nullptr}},
+         "Player"},
+        {"suyu_rumble",
+         "Controller Rumble",
+         nullptr,
+         "Forwards game vibration requests to RetroArch's rumble interface (uses the frontend's "
+         "own rumble strength setting).",
+         nullptr,
+         nullptr,
+         {{"Enabled", nullptr}, {"Disabled", nullptr}, {nullptr, nullptr}},
+         "Enabled"},
+        // --- Debugging category ---
+        {"suyu_log_level",
+         "Global Log Level",
+         "Log Level",
+         "Minimum severity logged for every category not overridden below. Trace is extremely "
+         "verbose and will noticeably slow emulation down; Debug is the usual choice for "
+         "troubleshooting.",
+         nullptr,
+         "debugging",
+         {{"Critical", nullptr},
+          {"Error", nullptr},
+          {"Warning", nullptr},
+          {"Info", nullptr},
+          {"Debug", nullptr},
+          {"Trace", nullptr},
+          {nullptr, nullptr}},
+         "Info"},
+        {"suyu_log_render",
+         "Rendering/Pipeline Log",
+         "Rendering/Pipeline",
+         "Debug-level logging for Render, Render.Vulkan, Render.OpenGL and Render.Software - "
+         "shader/pipeline creation, renderer init, per-frame renderer messages.",
+         nullptr,
+         "debugging",
+         {{"Off", nullptr}, {"On", nullptr}, {nullptr, nullptr}},
+         "Off"},
+        {"suyu_log_gpu",
+         "GPU/Engine Log",
+         "GPU/Engine",
+         "Debug-level logging for HW.GPU - the Maxwell command processor and GPU thread, "
+         "including per-frame timing-relevant messages.",
+         nullptr,
+         "debugging",
+         {{"Off", nullptr}, {"On", nullptr}, {nullptr, nullptr}},
+         "Off"},
+        {"suyu_log_fps",
+         "Frame Timing Log",
+         "Frame Timing",
+         "Logs this core's own measured frame interval/FPS periodically to suyu_log.txt (tagged "
+         "[FPS]), independent of suyu's internal emulation speed - for comparing a slow scene "
+         "against standalone suyu's own FPS counter to see whether the slowdown is in suyu's "
+         "emulation or specific to this core's render/readback path.",
+         nullptr,
+         "debugging",
+         {{"Off", nullptr}, {"On", nullptr}, {nullptr, nullptr}},
+         "Off"},
+        {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr},
+    };
+
+    static struct retro_core_options_v2 options_v2{
+        const_cast<struct retro_core_option_v2_category*>(categories),
+        const_cast<struct retro_core_option_v2_definition*>(definitions),
+    };
+
+    unsigned options_version = 0;
+    if (!cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &options_version)) {
+        options_version = 0;
+    }
+    if (options_version >= 2) {
+        cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &options_v2);
+    } else {
+        static const struct retro_variable vars[] = {
+            {"suyu_renderer", "Renderer; Vulkan|OpenGL|Software"},
+            {"suyu_resolution", "Internal Resolution; 1x|2x|3x|4x"},
+            {"suyu_scaling_filter",
+             "Window Adapting Filter; Bilinear|Bicubic|Lanczos|ScaleForce|FSR|NearestNeighbor"},
+            {"suyu_anti_aliasing", "Anti-Aliasing; None|FXAA|SMAA"},
+            {"suyu_cpu_accuracy", "CPU Accuracy; Auto|Accurate|Unsafe"},
+            {"suyu_use_docked", "Docked Mode; Yes|No"},
+            {"suyu_fastmem", "Fastmem; Enabled|Disabled"},
+            // Redirects suyu's data (NAND/SDMC/saves/config/keys/cache/logs) into
+            // RetroArch's own system/save directories instead of suyu's normal
+            // %APPDATA%\suyu (or <retroarch>\user in portable mode) location.
+            // Default is Enabled so the core behaves like other libretro cores
+            // out of the box; switch to Disabled to keep using a standalone
+            // suyu install's existing data instead.
+            {"suyu_use_frontend_dirs", "Use RetroArch System/Save Directories; Enabled|Disabled"},
+            {"suyu_audio_output", "Audio Output; Host (direct)|Frontend (libretro)"},
+            {"eden_rumble", "Controller Rumble; Enabled|Disabled"},
+            // suyu's own online play. RetroArch's netplay can't drive this core
+            // (see retro_serialize_size), but suyu's room system tunnels the
+            // game's own LAN multiplayer between peers and doesn't need frame
+            // sync, so it works here - it just needs somewhere to be configured,
+            // which is what these are.
+            {"suyu_online_enable", "suyu Online Play; Disabled|Enabled"},
+            {"suyu_online_server", "suyu Room Server; 127.0.0.1"},
+            {"suyu_online_port", "suyu Room Port; 24872"},
+            {"suyu_online_nickname", "suyu Online Nickname; Player"},
+            {"eden_log_level", "Debugging > Global Log Level; Info|Debug|Trace|Warning|Error|Critical"},
+            {"eden_log_render", "Debugging > Rendering/Pipeline Log; Off|On"},
+            {"eden_log_gpu", "Debugging > GPU/Engine Log; Off|On"},
+            {"eden_log_fps", "Debugging > Frame Timing Log; Off|On"},
+            {nullptr, nullptr},
+        };
+        cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
+    }
 
     // Tell the frontend up front that state serialization is not usable for
     // frame-sensitive features. RetroArch keys netplay and rerecording off
@@ -728,7 +1122,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             Settings::values.cpuopt_fastmem.SetValue(enabled);
             Settings::values.cpuopt_fastmem_exclusives.SetValue(enabled);
         }
+        var.key = "suyu_rumble";
+        var.value = nullptr;
+        if (g_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+            g_rumble_enabled = std::string(var.value) == "Enabled";
+        }
+        ApplyLogFilterFromOptions();
+        g_log_fps_enabled = ReadOption("suyu_log_fps") == "On";
         g_system->ApplySettings();
+
+        ApplyControllerPorts();
+        SetUpRumble();
 
         g_emu_window->UpdateCurrentFramebufferLayout(kFrameWidth * g_output_scale, kFrameHeight * g_output_scale);
         g_geometry_dirty = true;
@@ -851,6 +1255,11 @@ RETRO_API void retro_unload_game() {
         g_geometry_dirty = false;
         g_system->ShutdownMainProcess();
     }
+    if (g_input_subsystem && g_input_subsystem->GetVirtualGamepad()) {
+        g_input_subsystem->GetVirtualGamepad()->SetVibrationCallback(nullptr);
+    }
+    g_has_rumble_interface = false;
+    g_rumble_interface = {};
     g_manual_provider->ClearAllEntries();
     g_game_loaded = false;
     g_game_path.clear();

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include "input_common/input_engine.h"
 
 namespace InputCommon {

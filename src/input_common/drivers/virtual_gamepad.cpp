@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
-
+#include "common/logging.h"
 #include "input_common/drivers/virtual_gamepad.h"
 
 namespace InputCommon {
@@ -90,5 +90,28 @@ PadIdentifier VirtualGamepad::GetIdentifier(std::size_t player_index) const {
         .pad = 0,
     };
 }
+
+void VirtualGamepad::SetVibrationCallback(std::function<void(std::size_t, float, float)> callback) {
+    vibration_callback = std::move(callback);
+}
+
+bool VirtualGamepad::IsVibrationEnabled(const PadIdentifier& identifier) {
+    return vibration_callback != nullptr;
+}
+
+Common::Input::DriverResult VirtualGamepad::SetVibration(
+    const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) {
+
+    LOG_DEBUG(Input, "VirtualGamepad::SetVibration: port={} pad={} low={} high={}", identifier.port,
+              identifier.pad, vibration.low_amplitude, vibration.high_amplitude);
+
+    if (!vibration_callback) {
+        return Common::Input::DriverResult::NotSupported;
+    }
+
+    vibration_callback(identifier.port, vibration.low_amplitude, vibration.high_amplitude);
+    return Common::Input::DriverResult::Success;
+}
+
 
 } // namespace InputCommon

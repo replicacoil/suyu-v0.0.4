@@ -189,6 +189,22 @@ void EmulatedController::LoadDevices() {
 
     output_params[LeftIndex] = left_joycon;
     output_params[RightIndex] = right_joycon;
+
+    // Frontends that drive input through VirtualGamepad directly (the libretro
+    // core bridges via SetButtonState/SetStickPosition) never map real button
+    // params, so the default output params would point at an engine with no
+    // vibration path. When the mapped device isn't a real pad, route vibration
+    // to the virtual_gamepad engine, which forwards it to the frontend.
+    const std::string mapped_engine = left_joycon.Get("engine", std::string{});
+    if (mapped_engine.empty() || mapped_engine == "virtual_gamepad") {
+        Common::ParamPackage vg_params{};
+        vg_params.Set("engine", "virtual_gamepad");
+        vg_params.Set("port", static_cast<int>(Service::HID::NpadIdTypeToIndex(npad_id_type)));
+        output_params[LeftIndex] = vg_params;
+        output_params[RightIndex] = vg_params;
+    }
+
+
     output_params[2] = camera_params[1];
     output_params[3] = nfc_params[0];
     output_params[4] = android_params;
@@ -1267,6 +1283,12 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
 
     const auto player_index = Service::HID::NpadIdTypeToIndex(npad_id_type);
     const auto& player = Settings::values.players.GetValue()[player_index];
+
+    LOG_DEBUG(Service_HID, "SetVibration: index={} low={} high={} player_vib={} strength={}",
+            static_cast<u32>(device_index), vibration.low_amplitude, vibration.high_amplitude,
+            player.vibration_enabled, player.vibration_strength);
+
+
     const f32 strength = static_cast<f32>(player.vibration_strength) / 100.0f;
 
     if (!player.vibration_enabled) {
