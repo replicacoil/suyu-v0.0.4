@@ -76,9 +76,31 @@ public:
     /// Restores all inputs into the neutral position
     void ResetControllers();
 
+    /**
+     * Registers a callback invoked whenever SetVibration() below is called.
+     * This class has no knowledge of any particular embedding frontend, so
+     * an embedder that needs to forward vibration requests somewhere (e.g.
+     * the libretro core, forwarding to RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE)
+     * has to register one explicitly - without it, vibration requests for
+     * this engine silently go nowhere. Pass nullptr to clear it.
+     * @param callback invoked with (player_index, low_amplitude,
+     *        high_amplitude), each amplitude in the 0.0-1.0 range
+     */
+    void SetVibrationCallback(std::function<void(std::size_t player_index, float low_amplitude, float high_amplitude)>callback);
+
+    /// InputEngine override - without this, SetVibration() falls through to
+    /// the base class's no-op default and vibration requests for this engine
+    /// are silently dropped (this was the case until this override was added
+    /// - every other driver, e.g. SDLDriver, has always overridden this).
+    Common::Input::DriverResult SetVibration(const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) override;
+
+    // Must return true or the vibration stack never calls SetVibration().
+    bool IsVibrationEnabled(const PadIdentifier& identifier) override; 
+
 private:
     /// Returns the correct identifier corresponding to the player index
     PadIdentifier GetIdentifier(std::size_t player_index) const;
+    std::function<void(std::size_t player_index, float low_amplitude, float high_amplitude)>vibration_callback;
 };
 
 } // namespace InputCommon
