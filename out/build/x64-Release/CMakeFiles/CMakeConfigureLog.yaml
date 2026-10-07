@@ -118,5 +118,5 @@ events:
         - "D:\\Program Files\\Microsoft Visual Studio\\18\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja"
         - "D:\\Program Files\\Microsoft Visual Studio\\18\\Common7\\IDE\\VC\\Linux\\bin\\ConnectionManagerExe"
         - "D:\\Program Files\\Microsoft Visual Studio\\18\\VC\\vcpkg"
-      CMAKE_INSTALL_PREFIX: "G:/Visual Studio Solutions/Suyu/out/install/x64-Debug"
+      CMAKE_INSTALL_PREFIX: "G:/Visual Studio Solutions/Suyu/out/install/x64-Release"
 ...

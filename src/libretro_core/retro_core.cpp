@@ -207,7 +207,7 @@ void RedirectSuyuPathsToFrontend() {
     {
         std::error_code ec;
         std::filesystem::create_directories(system_base, ec);
-        Common::FS::SetSuyuPath(SuyuPath::EdenDir, system_base);
+        Common::FS::SetSuyuPath(SuyuPath::SuyuDir, system_base);
     }
 
     LOG_INFO(Frontend, "libretro: redirected suyu data - system={} save={}", system_base.string(),
@@ -337,14 +337,14 @@ void ApplyControllerPorts() {
     if (!g_system) {
         return;
     }
+    auto players = Settings::values.players.GetValue();
     for (int i = 0; i < 8; ++i) {
-        auto& p = Settings::values.players.GetValue()[i];
-        p.connected = true;
-        p.controller_type = MapDeviceType(g_port_device_type[i]);
-        p.vibration_enabled = g_rumble_enabled;
-        p.vibration_strength =
-            100; // 100% by default, RetroArch's own "Rumble Strength" slider can scale it down
+        players[i].connected = true;
+        players[i].controller_type = MapDeviceType(g_port_device_type[i]);
+        players[i].vibration_enabled = g_rumble_enabled;
+        players[i].vibration_strength = 100;
     }
+    Settings::values.players.SetValue(players);
     g_system->HIDCore().ReloadInputDevices();
 }
 
