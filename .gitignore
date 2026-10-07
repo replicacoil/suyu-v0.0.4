@@ -83,3 +83,4 @@ vcpkg_installed/
 /smash_test.png
 /smash_test3.png
 /search_results.csv
+/out/build/x64-Debug/.cmake/api/v1/reply
