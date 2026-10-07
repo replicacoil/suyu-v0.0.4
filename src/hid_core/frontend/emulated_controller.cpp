@@ -1326,7 +1326,9 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
     };
 
     // Send vibrations to Android's input overlay
-    output_devices[4]->SetVibration(status);
+    if (output_devices[4]) {
+        output_devices[4]->SetVibration(status);
+    }
 
     return output_devices[index]->SetVibration(status) == Common::Input::DriverResult::Success;
 }
