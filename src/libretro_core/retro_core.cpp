@@ -620,7 +620,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
             // suyu install's existing data instead.
             {"suyu_use_frontend_dirs", "Use RetroArch System/Save Directories; Enabled|Disabled"},
             {"suyu_audio_output", "Audio Output; Host (direct)|Frontend (libretro)"},
-            {"eden_rumble", "Controller Rumble; Enabled|Disabled"},
+            {"suyu_rumble", "Controller Rumble; Enabled|Disabled"},
             // suyu's own online play. RetroArch's netplay can't drive this core
             // (see retro_serialize_size), but suyu's room system tunnels the
             // game's own LAN multiplayer between peers and doesn't need frame
