@@ -337,14 +337,14 @@ void ApplyControllerPorts() {
     if (!g_system) {
         return;
     }
-    auto players = Settings::values.players.GetValue();
     for (int i = 0; i < 8; ++i) {
-        players[i].connected = true;
-        players[i].controller_type = MapDeviceType(g_port_device_type[i]);
-        players[i].vibration_enabled = g_rumble_enabled;
-        players[i].vibration_strength = 100;
+        auto& p = Settings::values.players.GetValue()[i];
+        p.connected = true;
+        p.controller_type = MapDeviceType(g_port_device_type[i]);
+        p.vibration_enabled = g_rumble_enabled;
+        p.vibration_strength =
+            100; // 100% by default, RetroArch's own "Rumble Strength" slider can scale it down
     }
-    Settings::values.players.SetValue(players);
     g_system->HIDCore().ReloadInputDevices();
 }
 
