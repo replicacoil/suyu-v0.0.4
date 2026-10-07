@@ -64,7 +64,8 @@ namespace {
 std::unique_ptr<Core::System> g_system;
 std::unique_ptr<LibretroCore::RetroEmuWindow> g_emu_window;
 std::shared_ptr<InputCommon::InputSubsystem> g_input_subsystem;
-static std::unique_ptr<FileSys::ManualContentProvider> g_manual_provider std::string g_game_path;
+static std::unique_ptr<FileSys::ManualContentProvider> g_manual_provider;
+std::string g_game_path;
 bool g_game_loaded = false;
 
 unsigned g_output_scale = 1;
@@ -307,8 +308,9 @@ RETRO_API void retro_init() {
     Settings::values.log_flush_line.SetValue(true);
     Settings::values.log_filter.SetValue("*:Info Service.VI:Debug Service.AM:Debug Service.Nvnflinger:Debug");
     g_system->ApplySettings();
+    g_manual_provider = std::make_unique<FileSys::ManualContentProvider>();  
     g_system->SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
-    g_system->RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, g_manual_provider.get())
+    g_system->RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, g_manual_provider.get());
     g_system->SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     g_system->GetFileSystemController().CreateFactories(*g_system->GetFilesystem());
     g_system->GetUserChannel().clear();
